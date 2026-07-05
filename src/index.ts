@@ -1,13 +1,15 @@
+import { writeFileSync } from "fs";
 import {
-  InterfaceDeclaration,
+  ModuleKind,
+  ModuleResolutionKind,
   Project,
   ScriptTarget,
-  ModuleResolutionKind,
-  ModuleKind,
-  SyntaxKind,
 } from "ts-morph";
-import { getDefaultValueForType } from "./getDefaultValueForType";
-import { getDeclarationName, getFunctionName } from "./names";
+import { generateTsStubs } from "./generator/generate";
+import { parseSourceFiles } from "./parser/parse";
+
+const INPUT = "_input.ts";
+const OUTPUT = "_output.ts";
 
 const project = new Project({
   compilerOptions: {
@@ -16,74 +18,19 @@ const project = new Project({
     moduleResolution: ModuleResolutionKind.NodeNext,
   },
 });
+project.addSourceFilesAtPaths(INPUT);
 
-project.addSourceFilesAtPaths("_input.ts");
-
-const diagnostics = project.getPreEmitDiagnostics();
-
-console.log(project.formatDiagnosticsWithColorAndContext(diagnostics));
-
-const sourceFile = project.getSourceFileOrThrow("_input.ts");
-const interfaces = sourceFile.getInterfaces();
-const types = sourceFile.getChildrenOfKind(SyntaxKind.TypeAliasDeclaration);
-
-const xxx = (s: string | undefined): s is string => Boolean(s);
-
-const allNames = interfaces
-  .map(getDeclarationName)
-  .concat(types.map(getDeclarationName))
-  .filter(xxx);
-
-const allNamesSet = new Set(allNames);
-
-console.log("---");
-console.log(allNames.join("\n"));
-
-const file = project.createSourceFile("_output.ts", undefined, {
-  overwrite: true,
+const { schema, warnings } = parseSourceFiles(
+  [project.getSourceFileOrThrow(INPUT)],
+  { rootDir: process.cwd() }
+);
+const { code, warnings: generatorWarnings } = generateTsStubs(schema, {
+  outputNamespace: OUTPUT.replace(/\.ts$/, ""),
 });
 
-for (let i of interfaces) {
-  const interfaceName = i.getName();
-  if (!allNamesSet.has(interfaceName)) {
-    continue;
-  }
-
-  const functionName =  getFunctionName(interfaceName);
-  const functionText = generateFunctionText(i);
-
-  file.addFunction({
-    name: functionName,
-    isExported: true,
-    statements: functionText,
-  });
+for (const w of [...warnings, ...generatorWarnings]) {
+  console.warn(`[${w.level}] ${w.code} (${w.path}): ${w.message}`);
 }
 
-file.formatText();
-project.saveSync();
-
-function generateFunctionText(
-  interfaceDeclaration: InterfaceDeclaration
-): string {
-  // Получаем все свойства интерфейса
-  const properties = interfaceDeclaration.getProperties();
-
-  // Формируем тело возвращаемого объекта
-  const objectProperties = properties
-    .map((prop) => {
-      const name = prop.getName();
-      const type = prop.getType();
-      const typeNode = prop.getTypeNode();
-
-      return `${name}: ${getDefaultValueForType(
-        allNamesSet,
-        name,
-        type,
-        typeNode
-      )}`;
-    })
-    .join(",\n    ");
-
-  // Возвращаем тело функции
-  return `return {\n    ${objectProperties}\n  };`;
-}
+writeFileSync(OUTPUT, code);
+console.log(`${OUTPUT}: типов в схеме — ${schema.types.length}`);

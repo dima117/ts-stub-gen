@@ -4,6 +4,7 @@ import {
   InterfaceDeclaration,
   LiteralTypeNode,
   Node,
+  SourceFile,
   SymbolFlags,
   SyntaxKind,
   Symbol as TsSymbol,
@@ -14,8 +15,7 @@ import {
   TypeReferenceNode,
 } from "ts-morph";
 import { EnumMemberDef, PropertySig, TypeExpr } from "../schema";
-import { namespaceOf } from "./namespace";
-import { WarningReporter } from "./warnings";
+import { ParserReporter } from "./warnings";
 
 export type NamedDeclaration =
   | InterfaceDeclaration
@@ -23,7 +23,9 @@ export type NamedDeclaration =
   | EnumDeclaration;
 
 export interface ConvertContext {
-  reporter: WarningReporter;
+  reporter: ParserReporter;
+  /** Namespace файла с учётом rootDir. */
+  namespaceOf(sourceFile: SourceFile): string;
   /** Регистрирует именованное объявление в схеме, возвращает его идентификатор. */
   enqueue(decl: NamedDeclaration): { namespace: string; name: string };
 }
@@ -44,7 +46,7 @@ export function buildDefinitionBody(
   decl: NamedDeclaration,
   ctx: ConvertContext
 ): TypeExpr {
-  const path = `${namespaceOf(decl.getSourceFile())}.${decl.getName()}`;
+  const path = `${ctx.namespaceOf(decl.getSourceFile())}.${decl.getName()}`;
 
   if (Node.isInterfaceDeclaration(decl)) {
     return convertMembers(decl, ctx, path, 0);

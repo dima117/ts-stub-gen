@@ -8,10 +8,17 @@ import {
 import { StubSchema, TypeDefinition } from "../schema";
 import { buildDefinitionBody, ConvertContext, NamedDeclaration } from "./convert";
 import { namespaceOf } from "./namespace";
-import { ParseWarning, WarningCode, WarningLevel, WarningReporter } from "./warnings";
+import {
+  createParserReporter,
+  ParseWarning,
+  WarningCode,
+  WarningLevel,
+} from "./warnings";
 
 export interface ParserOptions {
   warningLevels?: Partial<Record<WarningCode, WarningLevel>>;
+  /** Корень проекта: namespace берётся как путь файла относительно него. */
+  rootDir?: string;
 }
 
 export interface ParseResult {
@@ -29,12 +36,14 @@ export function parseSourceFiles(
   rootFiles: SourceFile[],
   options: ParserOptions = {}
 ): ParseResult {
-  const reporter = new WarningReporter(options.warningLevels);
+  const reporter = createParserReporter(options.warningLevels);
+  const toNamespace = (sourceFile: SourceFile) =>
+    namespaceOf(sourceFile, options.rootDir);
   const queue: NamedDeclaration[] = [];
   const visited = new Set<string>();
 
   const enqueue = (decl: NamedDeclaration) => {
-    const namespace = namespaceOf(decl.getSourceFile());
+    const namespace = toNamespace(decl.getSourceFile());
     const name = decl.getName();
     const key = `${namespace}::${name}`;
     if (!visited.has(key)) {
@@ -44,7 +53,7 @@ export function parseSourceFiles(
     return { namespace, name };
   };
 
-  const ctx: ConvertContext = { reporter, enqueue };
+  const ctx: ConvertContext = { reporter, namespaceOf: toNamespace, enqueue };
 
   for (const sourceFile of rootFiles) {
     const declarations: NamedDeclaration[] = [
@@ -56,7 +65,7 @@ export function parseSourceFiles(
       if (decl.isDefaultExport()) {
         reporter.report(
           "default-export",
-          `${namespaceOf(sourceFile)}.${decl.getName()}`,
+          `${toNamespace(sourceFile)}.${decl.getName()}`,
           `default-экспорт пока не поддерживается: ${decl.getName()}`
         );
         continue;
@@ -75,7 +84,7 @@ export function parseSourceFiles(
   while (queue.length > 0) {
     const decl = queue.shift()!;
     definitions.push({
-      namespace: namespaceOf(decl.getSourceFile()),
+      namespace: toNamespace(decl.getSourceFile()),
       name: decl.getName(),
       exported: decl.isExported() && !decl.isDefaultExport(),
       type: buildDefinitionBody(decl, ctx),
@@ -96,14 +105,8 @@ export function compareDefinitions(a: TypeDefinition, b: TypeDefinition): number
   return 0;
 }
 
-/**
- * Парсинг виртуальной файловой структуры (для тестов): пути + содержимое.
- * Импорты между виртуальными файлами резолвятся компилятором.
- */
-export function parseVirtual(
-  files: Record<string, string>,
-  options: ParserOptions & { rootFiles?: string[] } = {}
-): ParseResult {
+/** Проект во встроенной in-memory файловой системе (для тестов). */
+export function createVirtualProject(files: Record<string, string>): Project {
   const project = new Project({
     useInMemoryFileSystem: true,
     compilerOptions: {
@@ -115,6 +118,18 @@ export function parseVirtual(
   for (const [path, content] of Object.entries(files)) {
     project.createSourceFile(path, content);
   }
+  return project;
+}
+
+/**
+ * Парсинг виртуальной файловой структуры (для тестов): пути + содержимое.
+ * Импорты между виртуальными файлами резолвятся компилятором.
+ */
+export function parseVirtual(
+  files: Record<string, string>,
+  options: ParserOptions & { rootFiles?: string[] } = {}
+): ParseResult {
+  const project = createVirtualProject(files);
   const roots = (options.rootFiles ?? Object.keys(files)).map((path) =>
     project.getSourceFileOrThrow(path)
   );
