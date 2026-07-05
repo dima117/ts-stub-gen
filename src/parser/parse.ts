@@ -116,7 +116,12 @@ export function createVirtualProject(files: Record<string, string>): Project {
     },
   });
   for (const [path, content] of Object.entries(files)) {
-    project.createSourceFile(path, content);
+    if (/\.(?:d\.ts|tsx?|mts|cts)$/.test(path)) {
+      project.createSourceFile(path, content);
+    } else {
+      // package.json и прочие не-TS файлы: только в ФС, не в программу
+      project.getFileSystem().writeFileSync(path, content);
+    }
   }
   return project;
 }

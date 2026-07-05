@@ -10,7 +10,6 @@
 - защита от бесконечной рекурсии хелперов при обязательном рекурсивном поле (next: LinkedList)
 
 ## Парсер
-- **[приоритет] алиасы на ReturnType и inference-типы библиотек описания схем (zod z.infer, valibot InferOutput)** — важно для типов, описанных через API-схемы. Локальные conditional-алиасы (`type Infer<S> = S extends Schema<infer U> ? U : never` + `typeof schema`) уже раскрываются; не хватает семантического раскрытия внешних дженерик-алиасов из declaration-файлов (сейчас белый список Partial/Pick/Omit/Required/Readonly, остальное → unknown + unsupported-type). Тесты: ReturnType<typeof fn>, эмуляция z.infer, реальный пакет в node_modules
 - export default interface/type — сейчас предупреждение default-export, поддержать позже
 - квалифицированные имена и TS namespace (A.B.C)
 - bigint, template literal types

@@ -8,6 +8,7 @@ import { cases as named } from "./cases/c-named";
 import { cases as modules } from "./cases/d-modules";
 import { cases as computed } from "./cases/e-computed";
 import { cases as diagnostics } from "./cases/f-diagnostics";
+import { cases as inference } from "./cases/g-inference";
 
 const groups: Array<[string, SchemaTestCase[]]> = [
   ["A. примитивы и литералы", primitives],
@@ -16,6 +17,7 @@ const groups: Array<[string, SchemaTestCase[]]> = [
   ["D. файлы и импорты", modules],
   ["E. вычисляемые типы", computed],
   ["F. диагностика", diagnostics],
+  ["G. инференс из библиотек схем", inference],
 ];
 
 // Свойство: код, сгенерированный по схеме любого кейса парсера, обязан

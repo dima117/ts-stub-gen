@@ -33,15 +33,6 @@ export interface ConvertContext {
 const MAX_DEPTH = 30;
 const UNKNOWN: TypeExpr = { kind: "unknown" };
 
-/** Утилитарные типы из lib, которые раскрываем структурно. */
-const EXPANDED_LIB_TYPES = new Set([
-  "Partial",
-  "Required",
-  "Readonly",
-  "Pick",
-  "Omit",
-]);
-
 export function buildDefinitionBody(
   decl: NamedDeclaration,
   ctx: ConvertContext
@@ -208,16 +199,10 @@ function convertTypeReference(
   skipAlias?: TsSymbol
 ): TypeExpr {
   const typeName = node.getTypeName();
-  if (!Node.isIdentifier(typeName)) {
-    ctx.reporter.report(
-      "unsupported-type",
-      path,
-      `квалифицированное имя не поддерживается: ${typeName.getText()}`
-    );
-    return UNKNOWN;
-  }
+  // у квалифицированных имён (z.infer, t.TypeOf) резолвим правый идентификатор
+  const identifier = Node.isIdentifier(typeName) ? typeName : typeName.getRight();
 
-  const rawSymbol = typeName.getSymbol();
+  const rawSymbol = identifier.getSymbol();
   // импорты и реэкспорты — алиасные символы; резолвим до места объявления
   const symbol = rawSymbol?.getAliasedSymbol() ?? rawSymbol;
   const decl = symbol?.getDeclarations()[0];
@@ -231,7 +216,16 @@ function convertTypeReference(
   }
 
   if (decl.getSourceFile().isDeclarationFile()) {
-    return convertLibReference(symbol.getName(), node, ctx, path, depth, skipAlias);
+    return convertLibReference(decl, symbol.getName(), node, ctx, path, depth, skipAlias);
+  }
+  if (!Node.isIdentifier(typeName)) {
+    // квалифицированный доступ к собственным типам (TS namespace) — в бэклоге
+    ctx.reporter.report(
+      "unsupported-type",
+      path,
+      `квалифицированное имя не поддерживается: ${typeName.getText()}`
+    );
+    return UNKNOWN;
   }
   if (Node.isClassDeclaration(decl)) {
     ctx.reporter.report(
@@ -260,6 +254,7 @@ function convertTypeReference(
 }
 
 function convertLibReference(
+  decl: Node,
   name: string,
   node: TypeReferenceNode,
   ctx: ConvertContext,
@@ -287,9 +282,13 @@ function convertLibReference(
     ctx.reporter.report("date-type", path, "поле типа Date");
     return { kind: "date" };
   }
-  if (EXPANDED_LIB_TYPES.has(name)) {
+  if (Node.isTypeAliasDeclaration(decl)) {
+    // внешние алиасы раскрываем через результат работы компилятора: утилиты
+    // lib (Partial, Pick, ReturnType...) и inference-типы библиотек описания
+    // схем (z.infer у zod, InferOutput у valibot, TypeOf у io-ts и т.п.)
     return convertSemantic(node.getType(), node, ctx, path, depth + 1, skipAlias);
   }
+  // номинальные типы lib (Map, Set, Promise, классы) структурно не раскрываем
   ctx.reporter.report("unsupported-type", path, `внешний тип не поддерживается: ${name}`);
   return UNKNOWN;
 }
