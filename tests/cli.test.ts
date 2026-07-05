@@ -20,7 +20,7 @@ import { runStubGen } from "../src/cli/run";
 
 const dirs: string[] = [];
 const makeDir = () => {
-  const dir = mkdtempSync(join(tmpdir(), "stub-gen-cli-"));
+  const dir = mkdtempSync(join(tmpdir(), "ts-stub-gen-cli-"));
   dirs.push(dir);
   return dir;
 };
