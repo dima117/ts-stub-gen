@@ -152,6 +152,27 @@ describe("CLI: конфиг", () => {
     });
     expect(() => loadConfig(path)).toThrow(/off \| warn \| error/);
   });
+  it("некорректный селектор в values — ошибка", () => {
+    const path = writeConfig(makeDir(), {
+      source: { type: "typescript", entry: ["a.ts"] },
+      output: { file: "out.ts", values: { "a.b.c": "x" } },
+    });
+    expect(() => loadConfig(path)).toThrow(/Тип, Тип\.поле или \*\.поле/);
+  });
+  it("некорректная форма правила в values — ошибка", () => {
+    const path = writeConfig(makeDir(), {
+      source: { type: "typescript", entry: ["a.ts"] },
+      output: { file: "out.ts", values: { "*.id": { nope: 1 } } },
+    });
+    expect(() => loadConfig(path)).toThrow(/строкой-выражением/);
+  });
+  it("отсутствующий setupFile — понятная ошибка", () => {
+    const path = writeConfig(makeDir(), {
+      source: { type: "typescript", entry: ["a.ts"] },
+      output: { file: "out.ts", setupFile: "nope.ts" },
+    });
+    expect(() => loadConfig(path)).toThrow(/setupFile.*не найден/);
+  });
   it("уровни раскладываются по кодам парсера и генератора, пути резолвятся", () => {
     const dir = makeDir();
     const path = writeConfig(dir, {
@@ -191,6 +212,36 @@ describe("CLI: запуск", () => {
     expect(content).toContain(
       "export function GetStubUser(overrides: Partial<User> = {}): User {"
     );
+  });
+
+  it("setupFile вклеивается в сгенерированный файл, values применяются", () => {
+    const dir = makeDir();
+    writeFileSync(
+      join(dir, "input.ts"),
+      `export interface Account { id: string; }`
+    );
+    writeFileSync(
+      join(dir, "stub-setup.ts"),
+      `let n = 0;\nconst nextId = (): string => \`id-\${++n}\`;\n`
+    );
+    const configPath = writeConfig(dir, {
+      source: { type: "typescript", entry: ["input.ts"] },
+      output: {
+        file: "testing/stubs.ts",
+        setupFile: "stub-setup.ts",
+        values: { "*.id": "nextId()" },
+      },
+    });
+
+    runStubGen(loadConfig(configPath));
+
+    const stubs = readFileSync(join(dir, "testing", "stubs.ts"), "utf8");
+    expect(stubs).toContain(
+      "// --- начало setup-файла (stub-setup.ts); правьте исходный файл ---"
+    );
+    expect(stubs).toContain("const nextId = (): string =>");
+    expect(stubs).toContain("// --- конец setup-файла ---");
+    expect(stubs).toContain("id: (nextId()),");
   });
 
   it("учитывает helperPrefix", () => {

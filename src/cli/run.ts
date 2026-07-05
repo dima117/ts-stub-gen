@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "fs";
+import { mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname } from "path";
 import { ModuleKind, Project, ScriptTarget } from "ts-morph";
 import { generateTsStubs } from "../generator/generate";
@@ -40,9 +40,16 @@ export function runStubGen(config: ResolvedConfig): RunResult {
     rootDir: config.rootDir,
     warningLevels: config.parserWarningLevels,
   });
+  const setupCode =
+    config.setupFile !== undefined
+      ? readFileSync(config.setupFile, "utf8")
+      : undefined;
   const { code, warnings: generatorWarnings } = generateTsStubs(schema, {
     outputNamespace: config.outputNamespace,
     helperPrefix: config.helperPrefix,
+    values: config.values,
+    setupCode,
+    setupLabel: config.setupLabel,
     warningLevels: config.generatorWarningLevels,
   });
 

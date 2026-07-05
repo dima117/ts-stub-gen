@@ -1,6 +1,7 @@
-import { StubSchema, TypeDefinition, TypeExpr } from "../schema";
+import { PropertySig, StubSchema, TypeDefinition, TypeExpr } from "../schema";
 import { WarningLevel } from "../warnings";
 import { buildNameRegistry, NameRegistry, relativeModuleSpecifier } from "./names";
+import { parseValueRules, ValueRule, ValueRules } from "./values";
 import {
   createGeneratorReporter,
   GenerateWarning,
@@ -8,11 +9,19 @@ import {
   GeneratorWarningCode,
 } from "./warnings";
 
+export const DEFAULT_HELPER_PREFIX = "GetStub";
+
 export interface GeneratorOptions {
   /** Namespace выходного файла — от него считаются относительные импорты. */
   outputNamespace: string;
   /** Префикс имён хелперов; по умолчанию GetStub. */
   helperPrefix?: string;
+  /** Кастомные значения: селектор ("Тип" | "Тип.поле" | "*.поле") → выражение. */
+  values?: Record<string, ValueRule>;
+  /** Содержимое setup-файла — вклеивается после импортов, до хелперов. */
+  setupCode?: string;
+  /** Подпись setup-файла для комментария-рамки (обычно путь из конфига). */
+  setupLabel?: string;
   warningLevels?: Partial<Record<GeneratorWarningCode, WarningLevel>>;
 }
 
@@ -25,9 +34,9 @@ interface GenCtx {
   defs: Map<string, TypeDefinition>;
   registry: NameRegistry;
   reporter: GeneratorReporter;
+  rules: ValueRules;
+  usedSelectors: Set<string>;
 }
-
-export const DEFAULT_HELPER_PREFIX = "GetStub";
 
 const defKey = (namespace: string, name: string) => `${namespace}::${name}`;
 
@@ -48,18 +57,48 @@ export function generateTsStubs(
     defs: new Map(schema.types.map((d) => [defKey(d.namespace, d.name), d])),
     registry,
     reporter,
+    rules: parseValueRules(options.values),
+    usedSelectors: new Set(),
   };
 
   const exported = schema.types.filter((d) => d.exported);
-  const imports = generateImports(exported, registry, options.outputNamespace);
   const functions = exported.map((def) => generateHelper(def, ctx));
+
+  for (const selector of ctx.rules.selectors) {
+    if (!ctx.usedSelectors.has(selector)) {
+      reporter.report(
+        "value-unused",
+        selector,
+        `правило "${selector}" не применилось ни разу`
+      );
+    }
+  }
+
+  const imports = generateImports(exported, registry, options.outputNamespace);
+  const setup = setupBlock(options.setupCode, options.setupLabel);
 
   const code =
     functions.length === 0
       ? "export {};\n"
-      : [imports.join("\n"), ...functions].filter(Boolean).join("\n\n") + "\n";
+      : [imports.join("\n"), setup, ...functions].filter(Boolean).join("\n\n") +
+        "\n";
 
   return { code, warnings: reporter.warnings };
+}
+
+/** Вклеенный setup выделяется комментариями: редактировать нужно исходник. */
+function setupBlock(
+  setupCode: string | undefined,
+  label: string | undefined
+): string | undefined {
+  const setup = setupCode?.trim();
+  if (!setup) return undefined;
+  const source = label !== undefined ? ` (${label})` : "";
+  return [
+    `// --- начало setup-файла${source}; правьте исходный файл ---`,
+    setup,
+    "// --- конец setup-файла ---",
+  ].join("\n");
 }
 
 function generateImports(
@@ -106,16 +145,32 @@ function generateHelper(def: TypeDefinition, ctx: GenCtx): string {
   const path = `${def.namespace}.${def.name}`;
   const body = def.type;
   const stack = new Set([defKey(def.namespace, def.name)]);
+  const typeRule = takeTypeRule(def.name, ctx);
 
-  if (body.kind === "object") {
+  if (body.kind === "object" || body.kind === "record") {
+    // правило типа задаёт базовое значение целиком; корректность проверит
+    // компилятор сгенерированного файла
+    if (typeRule !== undefined) {
+      return [
+        `export function ${fn}(overrides: Partial<${local}> = {}): ${local} {`,
+        `  return { ...(${typeRule}), ...overrides };`,
+        "}",
+      ].join("\n");
+    }
+    if (body.kind === "record") {
+      // Partial индексной сигнатуры добавил бы undefined в тип значений
+      return [
+        `export function ${fn}(overrides: ${local} = {}): ${local} {`,
+        "  return { ...overrides };",
+        "}",
+      ].join("\n");
+    }
     const lines: string[] = [];
     for (const prop of body.properties) {
-      // optional-поля не заполняем: стаб минимален, и это разрывает
-      // рекурсию хелперов при взаимных ссылках через optional-поля
-      if (prop.optional) continue;
-      lines.push(
-        `    ${propKey(prop.name)}: ${defaultExpr(prop.type, ctx, `${path}.${prop.name}`, stack)},`
-      );
+      const value = propertyDefault(prop, def.name, ctx, path, stack);
+      if (value !== undefined) {
+        lines.push(`    ${propKey(prop.name)}: ${value},`);
+      }
     }
     lines.push("    ...overrides,");
     return [
@@ -127,22 +182,15 @@ function generateHelper(def: TypeDefinition, ctx: GenCtx): string {
     ].join("\n");
   }
 
-  if (body.kind === "record") {
-    // Partial индексной сигнатуры добавил бы undefined в тип значений
-    return [
-      `export function ${fn}(overrides: ${local} = {}): ${local} {`,
-      "  return { ...overrides };",
-      "}",
-    ].join("\n");
-  }
-
   // примитивы, union, tuple, enum, date — подмена значения целиком
   const fallback =
-    body.kind === "enum"
-      ? body.members.length > 0
-        ? `${local}.${body.members[0].name}`
-        : "undefined as any"
-      : defaultExpr(body, ctx, path, stack);
+    typeRule !== undefined
+      ? `(${typeRule})`
+      : body.kind === "enum"
+        ? body.members.length > 0
+          ? `${local}.${body.members[0].name}`
+          : "undefined as any"
+        : defaultExpr(body, ctx, path, stack);
   return [
     `export function ${fn}(override?: ${local}): ${local} {`,
     `  return override !== undefined ? override : ${fallback};`,
@@ -150,11 +198,61 @@ function generateHelper(def: TypeDefinition, ctx: GenCtx): string {
   ].join("\n");
 }
 
+/** Правило для поля с учётом приоритета: Тип.поле > *.поле. Помечает использование. */
+function takeFieldRule(
+  typeName: string | undefined,
+  fieldName: string,
+  ctx: GenCtx
+): ValueRule | undefined {
+  if (typeName !== undefined) {
+    const selector = `${typeName}.${fieldName}`;
+    const rule = ctx.rules.byTypeField.get(selector);
+    if (rule !== undefined) {
+      ctx.usedSelectors.add(selector);
+      return rule;
+    }
+  }
+  const rule = ctx.rules.byField.get(fieldName);
+  if (rule !== undefined) {
+    ctx.usedSelectors.add(`*.${fieldName}`);
+    return rule;
+  }
+  return undefined;
+}
+
+function takeTypeRule(typeName: string, ctx: GenCtx): ValueRule | undefined {
+  const rule = ctx.rules.byType.get(typeName);
+  if (rule !== undefined) {
+    ctx.usedSelectors.add(typeName);
+  }
+  return rule;
+}
+
+/**
+ * Выражение для значения поля: кастомное правило, иначе дефолт по типу.
+ * undefined — поле не заполняется (optional без правила).
+ */
+function propertyDefault(
+  prop: PropertySig,
+  typeName: string | undefined,
+  ctx: GenCtx,
+  path: string,
+  stack: ReadonlySet<string>
+): string | undefined {
+  const rule = takeFieldRule(typeName, prop.name, ctx);
+  if (rule !== undefined) return `(${rule})`;
+  // optional-поля без правила не заполняем: стаб минимален, и это разрывает
+  // рекурсию хелперов при взаимных ссылках
+  if (prop.optional) return undefined;
+  return defaultExpr(prop.type, ctx, `${path}.${prop.name}`, stack);
+}
+
 function defaultExpr(
   expr: TypeExpr,
   ctx: GenCtx,
   path: string,
-  stack: ReadonlySet<string>
+  stack: ReadonlySet<string>,
+  typeName?: string
 ): string {
   switch (expr.kind) {
     case "string":
@@ -184,9 +282,13 @@ function defaultExpr(
         ? defaultExpr(expr.variants[0], ctx, path, stack)
         : "undefined as any";
     case "object": {
-      const parts = expr.properties
-        .filter((p) => !p.optional)
-        .map((p) => `${propKey(p.name)}: ${defaultExpr(p.type, ctx, `${path}.${p.name}`, stack)}`);
+      const parts: string[] = [];
+      for (const prop of expr.properties) {
+        const value = propertyDefault(prop, typeName, ctx, path, stack);
+        if (value !== undefined) {
+          parts.push(`${propKey(prop.name)}: ${value}`);
+        }
+      }
       return parts.length > 0 ? `{ ${parts.join(", ")} }` : "{}";
     }
     case "enum":
@@ -209,6 +311,11 @@ function defaultExpr(
       if (target.exported) {
         return `${ctx.registry.helperName(target)}()`;
       }
+      // кастом на неэкспортированный тип применяется при инлайн-раскрытии
+      const typeRule = takeTypeRule(target.name, ctx);
+      if (typeRule !== undefined) {
+        return `(${typeRule})`;
+      }
       if (stack.has(key)) {
         ctx.reporter.report(
           "inline-cycle",
@@ -217,7 +324,13 @@ function defaultExpr(
         );
         return "undefined as any";
       }
-      return defaultExpr(target.type, ctx, path, new Set([...stack, key]));
+      return defaultExpr(
+        target.type,
+        ctx,
+        path,
+        new Set([...stack, key]),
+        target.name
+      );
     }
   }
 }

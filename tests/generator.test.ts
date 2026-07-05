@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import ts from "typescript";
 import { generateTsStubs } from "../src/generator/generate";
-import { parseVirtual } from "../src/parser/parse";
+import { createVirtualProject, parseVirtual } from "../src/parser/parse";
 import { StubSchema, TypeDefinition } from "../src/schema";
-import { arr, bool, def, enumOf, num, obj, p, ref, str } from "./dsl";
+import { arr, bool, date, def, enumOf, num, obj, p, ref, str } from "./dsl";
 
 const schemaOf = (...types: TypeDefinition[]): StubSchema => ({ version: 1, types });
 
@@ -128,6 +128,156 @@ export function GetStubUserId(override?: UserId): UserId {
     const { code, warnings } = generateTsStubs(schemaOf(), { outputNamespace: "_stubs" });
     expect(warnings).toEqual([]);
     expect(code).toBe("export {};\n");
+  });
+});
+
+describe("генератор: кастомные значения", () => {
+  it("выражения по селекторам; setup вклеивается после импортов; optional с правилом заполняется", () => {
+    const schema = schemaOf(
+      def(
+        "main",
+        "Account",
+        true,
+        obj(p("id", str), p("phone", str, true), p("when", date))
+      )
+    );
+    const { code, warnings } = generateTsStubs(schema, {
+      outputNamespace: "_stubs",
+      setupCode: "let n = 0;\nconst nextId = (): string => `id-${++n}`;\n",
+      setupLabel: "stub-setup.ts",
+      values: {
+        "*.id": "nextId()",
+        "Account.phone": "'+7 900 000-00-00'",
+        "*.when": "new Date(2020, 0, 1)",
+      },
+    });
+    expect(warnings).toEqual([]);
+    expect(code).toBe(`import type { Account } from "./main";
+
+// --- начало setup-файла (stub-setup.ts); правьте исходный файл ---
+let n = 0;
+const nextId = (): string => \`id-\${++n}\`;
+// --- конец setup-файла ---
+
+export function GetStubAccount(overrides: Partial<Account> = {}): Account {
+  return {
+    id: (nextId()),
+    phone: ('+7 900 000-00-00'),
+    when: (new Date(2020, 0, 1)),
+    ...overrides,
+  };
+}
+`);
+  });
+
+  it("приоритет: Тип.поле выше *.поле", () => {
+    const schema = schemaOf(
+      def("main", "Account", true, obj(p("id", str))),
+      def("main", "User", true, obj(p("id", str)))
+    );
+    const { code, warnings } = generateTsStubs(schema, {
+      outputNamespace: "_stubs",
+      values: { "Account.id": "'acc-id'", "*.id": "'common-id'" },
+    });
+    expect(warnings).toEqual([]);
+    expect(code).toContain(`id: ('acc-id')`);
+    expect(code).toContain(`id: ('common-id')`);
+  });
+
+  it("селектор типа: хелпер алиаса, инлайн-раскрытие и объектный тип целиком", () => {
+    const schema = schemaOf(
+      def("main", "Account", true, obj(p("id", str))),
+      def("main", "Internal", false, str),
+      def("main", "PhoneNumber", true, str),
+      def(
+        "main",
+        "Wrapper",
+        true,
+        obj(p("phone", ref("main", "PhoneNumber")), p("int", ref("main", "Internal")))
+      )
+    );
+    const { code, warnings } = generateTsStubs(schema, {
+      outputNamespace: "_stubs",
+      values: {
+        PhoneNumber: "'+7 111'",
+        Internal: "'inlined'",
+        Account: "makeAccount()",
+      },
+    });
+    expect(warnings).toEqual([]);
+    expect(code).toContain(`override !== undefined ? override : ('+7 111')`);
+    expect(code).toContain(`int: ('inlined')`);
+    expect(code).toContain(`return { ...(makeAccount()), ...overrides };`);
+  });
+
+  it("неиспользованный селектор: предупреждение value-unused", () => {
+    const schema = schemaOf(def("main", "Account", true, obj(p("id", str))));
+    const { warnings } = generateTsStubs(schema, {
+      outputNamespace: "_stubs",
+      values: { "*.nope": "'x'" },
+    });
+    expect(warnings.map((w) => `${w.code}:${w.path}`)).toEqual([
+      "value-unused:*.nope",
+    ]);
+  });
+
+  it("корректные выражения компилируются, ошибка типа в выражении ломает сборку", () => {
+    const files = {
+      "/main.ts": `export interface Account { id: string; phone: string; }`,
+    };
+    const { schema } = parseVirtual(files);
+    const good = generateTsStubs(schema, {
+      outputNamespace: "_stubs",
+      setupCode: "const nextId = (): string => 'id-1';",
+      values: { "*.id": "nextId()", "Account.phone": "'+7 900 000-00-00'" },
+    });
+    const project = createVirtualProject(files);
+    const goodFile = project.createSourceFile("/_stubs.ts", good.code);
+    expect(
+      project.formatDiagnosticsWithColorAndContext(goodFile.getPreEmitDiagnostics())
+    ).toBe("");
+
+    // выражение неверного типа — TS ловит это при сборке тестов
+    const bad = generateTsStubs(schema, {
+      outputNamespace: "_stubs",
+      setupCode: "const wrongId = (): number => 0;",
+      values: { "*.id": "wrongId()" },
+    });
+    const badProject = createVirtualProject(files);
+    const badFile = badProject.createSourceFile("/_stubs.ts", bad.code);
+    expect(badFile.getPreEmitDiagnostics().length).toBeGreaterThan(0);
+  });
+
+  it("рантайм: выражения из setup вычисляются при каждом вызове", () => {
+    const files = {
+      "/main.ts": `export interface Account { id: string; phone: string; }`,
+    };
+    const { schema } = parseVirtual(files);
+    const { code } = generateTsStubs(schema, {
+      outputNamespace: "_stubs",
+      setupCode: "let n = 0;\nconst nextId = (): string => `id-${++n}`;",
+      values: { "*.id": "nextId()", "Account.phone": "'+7 900 000-00-00'" },
+    });
+
+    const js = ts.transpileModule(code, {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2020,
+      },
+    }).outputText;
+    const mod = { exports: {} as any };
+    new Function("exports", "require", "module", js)(
+      mod.exports,
+      () => {
+        throw new Error("в сгенерированном коде не должно быть рантайм-импортов");
+      },
+      mod
+    );
+    const { GetStubAccount } = mod.exports;
+
+    expect(GetStubAccount()).toEqual({ id: "id-1", phone: "+7 900 000-00-00" });
+    expect(GetStubAccount().id).toBe("id-2"); // вычисляется при каждом вызове
+    expect(GetStubAccount({ id: "custom" }).id).toBe("custom");
   });
 });
 

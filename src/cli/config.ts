@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "fs";
 import { dirname, relative, resolve } from "path";
 import * as v from "valibot";
+import { ValueRule } from "../generator/values";
 import {
   DEFAULT_GENERATOR_WARNING_LEVELS,
   GeneratorWarningCode,
@@ -19,6 +20,14 @@ const PARSER_CODES = Object.keys(DEFAULT_WARNING_LEVELS);
 const GENERATOR_CODES = Object.keys(DEFAULT_GENERATOR_WARNING_LEVELS);
 const KNOWN_WARNING_CODES = [...PARSER_CODES, ...GENERATOR_CODES];
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+/** Селектор кастомного значения: "Тип" | "Тип.поле" | "*.поле". */
+const VALUE_SELECTOR =
+  /^(?:\*\.[A-Za-z_$][A-Za-z0-9_$]*|[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)?)$/;
+
+const ValueRuleSchema = v.pipe(
+  v.string("правило должно быть строкой-выражением TypeScript"),
+  v.nonEmpty("правило должно быть строкой-выражением TypeScript")
+);
 
 /**
  * Схема конфига — единственный источник правды: тип CliConfig выводится
@@ -51,6 +60,18 @@ const ConfigSchema = v.strictObject({
         v.regex(IDENTIFIER, "ожидается корректный префикс идентификатора")
       )
     ),
+    setupFile: v.optional(
+      v.pipe(v.string(), v.nonEmpty("ожидается путь к setup-файлу"))
+    ),
+    values: v.optional(
+      v.record(
+        v.pipe(
+          v.string(),
+          v.regex(VALUE_SELECTOR, "селектор должен иметь вид Тип, Тип.поле или *.поле")
+        ),
+        ValueRuleSchema
+      )
+    ),
   }),
   warnings: v.optional(
     v.record(
@@ -80,6 +101,12 @@ export interface ResolvedConfig {
   /** Namespace выходного файла относительно rootDir (для импортов). */
   outputNamespace: string;
   helperPrefix?: string;
+  /** Кастомные значения: селектор → выражение. */
+  values?: Record<string, ValueRule>;
+  /** Setup-файл: содержимое вклеивается в сгенерированный файл после импортов. */
+  setupFile?: string;
+  /** Подпись setup-файла для комментария-рамки — как записано в конфиге. */
+  setupLabel?: string;
   parserWarningLevels: Partial<Record<WarningCode, WarningLevel>>;
   generatorWarningLevels: Partial<Record<GeneratorWarningCode, WarningLevel>>;
 }
@@ -138,9 +165,13 @@ export function loadConfig(configPath: string): ResolvedConfig {
     throw new ConfigError(`source.tsconfig: файл не найден: ${tsconfig}`);
   }
   const outputFile = resolve(base, config.output.file);
-  const outputNamespace = relative(rootDir, outputFile)
-    .replace(/\\/g, "/")
-    .replace(/\.(?:d\.ts|tsx?|mts|cts)$/, "");
+  const setupFile =
+    config.output.setupFile !== undefined
+      ? resolve(base, config.output.setupFile)
+      : undefined;
+  if (setupFile && !existsSync(setupFile)) {
+    throw new ConfigError(`output.setupFile: файл не найден: ${setupFile}`);
+  }
   const entryList =
     typeof config.source.entry === "string"
       ? [config.source.entry]
@@ -152,8 +183,13 @@ export function loadConfig(configPath: string): ResolvedConfig {
     tsconfig,
     rootDir,
     outputFile,
-    outputNamespace,
+    outputNamespace: relative(rootDir, outputFile)
+      .replace(/\\/g, "/")
+      .replace(/\.(?:d\.ts|tsx?|mts|cts)$/, ""),
     helperPrefix: config.output.helperPrefix,
+    values: config.output.values,
+    setupFile,
+    setupLabel: config.output.setupFile,
     parserWarningLevels,
     generatorWarningLevels,
   };
