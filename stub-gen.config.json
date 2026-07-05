@@ -1,0 +1,9 @@
+{
+  "source": {
+    "type": "typescript",
+    "entry": ["_input.ts"]
+  },
+  "output": {
+    "file": "_output.ts"
+  }
+}

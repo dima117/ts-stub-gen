@@ -27,6 +27,8 @@ interface GenCtx {
   reporter: GeneratorReporter;
 }
 
+export const DEFAULT_HELPER_PREFIX = "GetStub";
+
 const defKey = (namespace: string, name: string) => `${namespace}::${name}`;
 
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
@@ -38,7 +40,10 @@ export function generateTsStubs(
   options: GeneratorOptions
 ): GenerateResult {
   const reporter = createGeneratorReporter(options.warningLevels);
-  const registry = buildNameRegistry(schema.types, options.helperPrefix ?? "GetStub");
+  const registry = buildNameRegistry(
+    schema.types,
+    options.helperPrefix ?? DEFAULT_HELPER_PREFIX
+  );
   const ctx: GenCtx = {
     defs: new Map(schema.types.map((d) => [defKey(d.namespace, d.name), d])),
     registry,

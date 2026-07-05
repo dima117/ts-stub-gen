@@ -1,4 +1,5 @@
-export type WarningLevel = "off" | "warn" | "error";
+export const WARNING_LEVELS = ["off", "warn", "error"] as const;
+export type WarningLevel = (typeof WARNING_LEVELS)[number];
 
 export interface Warning<C extends string = string> {
   code: C;
